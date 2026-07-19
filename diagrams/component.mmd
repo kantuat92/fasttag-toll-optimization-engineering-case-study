@@ -1,0 +1,49 @@
+---
+title: "FASTag — Component Diagram: Pre-Auth Service (C4 Level 3)"
+---
+C4Component
+    title Pre-Auth Service — Internal Components
+
+    Person_Ext(commuter, "Commuter", "Drives through lane")
+
+    System_Boundary(edge, "Edge Processing Unit") {
+        Component(edge_processor, "Edge Processor", "Spring Boot", "Reads RFID tag. Publishes TagRead event.")
+    }
+
+    System_Boundary(preauth, "Pre-Auth Service (AKS Pod)") {
+        Component(tag_consumer, "TagRead Consumer", "Kafka Consumer / Spring Kafka", "Consumes tag.read topic. Validates message schema. Deduplicates within 30s window.")
+        Component(preauth_orchestrator, "PreAuth Orchestrator", "Spring Service", "Coordinates balance cache check, NPCI call, token issuance, and event publication. Applies circuit breaker on NPCI client.")
+        Component(balance_cache, "Balance Cache Client", "Redis Client / Spring Cache", "Reads cached balance for fast pre-check before NPCI call. TTL: 5 minutes.")
+        Component(npci_client, "NPCI Gateway Client", "Spring WebClient + Resilience4j", "Calls NPCI pre-auth API. Circuit breaker (5 failures / 30s → open). Timeout: 8 seconds. Retry: 2 attempts with exponential backoff.")
+        Component(token_store, "Token Store", "Redis Client", "Writes pre-auth token with 120s TTL, keyed by tag_id+lane_id+plaza_id. Shared with Edge Redis via replication.")
+        Component(event_publisher, "PreAuth Event Publisher", "Kafka Producer", "Publishes PreAuthorizationApproved or PreAuthorizationDeclined to preauth.result topic. Idempotent producer.")
+        Component(telemetry, "Telemetry Component", "OTel SDK", "Emits spans for every external call. Enriches spans with fasttag.* semantic attributes. Exposes Prometheus metrics endpoint.")
+    }
+
+    System_Boundary(downstream, "Downstream Services") {
+        Component(lane_controller_cache, "Lane Controller", "Edge — Redis lookup", "Validates pre-auth token on vehicle arrival at barrier.")
+        Component(payment_svc, "Payment Service", "AKS", "Consumes PreAuth events to initiate settlement after barrier opens.")
+    }
+
+    ContainerDb(redis_cloud, "Redis Cluster (Cloud)", "Redis 7", "Token store + balance cache")
+    ContainerDb(redis_edge, "Redis Cache (Edge)", "Redis 7", "Replicated token cache for offline operation")
+
+    System_Ext(npci, "NPCI Payment Gateway", "External payment network")
+    System_Ext(kafka, "Apache Kafka", "Event bus")
+
+    Rel(edge_processor, kafka, "Publishes TagRead", "Kafka / TLS")
+    Rel(kafka, tag_consumer, "Consumes tag.read", "Kafka consumer group: preauth-service")
+    Rel(tag_consumer, preauth_orchestrator, "Dispatches validated TagRead")
+    Rel(preauth_orchestrator, balance_cache, "Check cached balance")
+    Rel(balance_cache, redis_cloud, "Redis GET", "Redis protocol")
+    Rel(preauth_orchestrator, npci_client, "Request pre-authorization")
+    Rel(npci_client, npci, "POST /v1/preauth", "HTTPS / REST")
+    Rel(npci, npci_client, "Pre-auth token + hold confirmation")
+    Rel(preauth_orchestrator, token_store, "Store pre-auth token (TTL 120s)")
+    Rel(token_store, redis_cloud, "Redis SET", "Redis protocol")
+    Rel(redis_cloud, redis_edge, "Token replication", "Redis replication")
+    Rel(preauth_orchestrator, event_publisher, "Publish result event")
+    Rel(event_publisher, kafka, "Publishes to preauth.result", "Kafka / TLS")
+    Rel(kafka, lane_controller_cache, "Async token sync (via edge cache)")
+    Rel(kafka, payment_svc, "Consumes PreAuthApproved")
+    Rel(preauth_orchestrator, telemetry, "Span enrichment")

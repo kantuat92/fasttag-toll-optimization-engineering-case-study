@@ -1,0 +1,55 @@
+---
+title: "FASTag — Vehicle Passage Sequence (Happy Path)"
+---
+sequenceDiagram
+    autonumber
+    participant V as Vehicle
+    participant RU as RFID Reader<br/>(150m upstream)
+    participant EP as Edge Processor
+    participant K as Kafka
+    participant PA as Pre-Auth Service
+    participant NPCI as NPCI Gateway
+    participant RC as Redis Cache<br/>(Edge)
+    participant LC as Lane Controller
+    participant AS as Audit Service
+
+    Note over V,AS: T = 0s — Vehicle enters upstream detection zone (150m from gate)
+
+    V->>RU: RFID tag in range
+    RU->>EP: Tag ID + signal strength (TCP/IP)
+    EP->>RC: Check: recent read for this tag+lane? (idempotency)
+    RC-->>EP: No recent read
+    EP->>K: Publish TagRead event {tag_id, lane_id, plaza_id, timestamp}
+
+    Note over EP,NPCI: T = 1s — Pre-authorization begins in cloud
+
+    K->>PA: Consume TagRead event
+    PA->>RC: Check balance cache (Redis cloud cluster)
+    RC-->>PA: Cache miss (or stale)
+    PA->>NPCI: POST /preauth {tag_id, amount, plaza_id, idempotency_key}
+
+    Note over PA,NPCI: T = 1–4s — NPCI processes pre-authorization
+
+    NPCI-->>PA: 200 OK {pre_auth_token, hold_amount, expires_at}
+    PA->>RC: SET pre_auth_token (TTL: 120s, key: tag_id+lane_id)
+    PA->>K: Publish PreAuthorizationApproved event
+
+    Note over V,LC: T = 12–14s — Vehicle arrives at barrier
+
+    V->>LC: Loop sensor triggered (vehicle at gate)
+    LC->>RC: GET pre_auth_token for tag_id+lane_id
+    RC-->>LC: Token found (age: ~11s, within TTL)
+    LC->>LC: Validate token (not expired, plaza+lane match)
+
+    Note over LC,V: T = 14s — Barrier opens (< 2s after vehicle arrival)
+
+    LC->>V: Barrier arm raised ✓
+    LC->>K: Publish BarrierOpened event {pre_auth_token, processing_time_ms}
+
+    Note over K,AS: T = 14–20s — Async settlement and audit (not in critical path)
+
+    K->>AS: Consume BarrierOpened event
+    AS->>AS: Write audit record (append-only)
+
+    Note over AS: Total vehicle wait at barrier: < 2 seconds
+    Note over AS: End-to-end processing time: ~14 seconds (P50)

@@ -1,0 +1,131 @@
+---
+title: "FASTag — Deployment Architecture"
+---
+graph TB
+    subgraph AZURE["Azure Cloud — East India Region"]
+        subgraph AKS["Azure Kubernetes Service — Production Cluster"]
+            subgraph NS_GW["Namespace: gateway"]
+                GW["Spring Cloud Gateway\n(3 replicas)"]
+            end
+            subgraph NS_PA["Namespace: payment"]
+                PA["Pre-Auth Service\n(3 replicas)"]
+                PS["Payment Service\n(2 replicas)"]
+            end
+            subgraph NS_LANE["Namespace: lane-management"]
+                LM["Lane Management Service\n(2 replicas)"]
+                FD["Fraud Detection Service\n(2 replicas)"]
+            end
+            subgraph NS_AUDIT["Namespace: audit"]
+                AU["Audit Service\n(2 replicas)"]
+            end
+            subgraph NS_OPS["Namespace: operations"]
+                OPS["AI Ops Assistant\n(1 replica)"]
+                NHAI_SVC["NHAI Reporting Service\n(1 replica)"]
+            end
+            subgraph NS_OBS["Namespace: observability"]
+                OTEL["OTel Collector\n(DaemonSet)"]
+            end
+        end
+
+        subgraph DATA["Managed Data Services"]
+            PG_PRIMARY["PostgreSQL Primary\n(Azure DB for PostgreSQL Flexible Server)"]
+            PG_REPLICA["PostgreSQL Read Replica"]
+            REDIS_CLOUD["Azure Cache for Redis\n(Enterprise tier, cluster mode)"]
+            KAFKA["Apache Kafka\n(Azure Event Hubs — Kafka protocol)\nPartitions: 48 (4 per lane × 12 lanes)"]
+        end
+
+        subgraph SECURITY["Security Services"]
+            KV["Azure Key Vault\n(Secrets, Certificates, TLS)"]
+            AAD["Azure Active Directory\n(Operator Auth, Service Identities)"]
+        end
+
+        ML_PLATFORM["Azure ML\n(Inference Endpoints:\nreader-failure-pred\nqueue-forecast\nfraud-scorer)"]
+
+        ACR["Azure Container Registry\n(Image repository)"]
+        CDN_FRONT["Azure Front Door\n(Operator Dashboard delivery)"]
+    end
+
+    subgraph DT_SAAS["Dynatrace SaaS"]
+        DYNATRACE["Dynatrace\n(APM · Tracing · Logs · Davis AI · SLOs)"]
+    end
+
+    subgraph PLAZAS["Toll Plazas (Distributed Edge)"]
+        subgraph P1["Plaza NH-48-023"]
+            subgraph LANE1["Lane 01–04"]
+                EP1["Edge Processing Unit\n(Spring Boot containerized)\n+ Local Redis (token cache)"]
+                READER1["RFID Reader Array\n(150m upstream, dual)"]
+                LC1["Lane Controller\n(barrier interface)"]
+            end
+        end
+        subgraph P2["Plaza NH-44-107"]
+            EP2["Edge Processing Unit"]
+            READER2["RFID Reader Array"]
+            LC2["Lane Controller"]
+        end
+        subgraph PN["Plaza ... (N)"]
+            EPN["Edge Processing Unit"]
+        end
+    end
+
+    subgraph CICD["CI/CD Pipeline"]
+        ADO["Azure DevOps\n(Build · Test · SAST · Image push)"]
+        ARGO["ArgoCD\n(GitOps deployment\nto AKS + Edge)"]
+    end
+
+    subgraph EXT["External Systems"]
+        NPCI["NPCI Payment Gateway\n(External — SLA: P95 < 3s)"]
+        NHAI_EXT["NHAI Central\nReporting System"]
+    end
+
+    %% Edge to cloud
+    EP1 -->|"Kafka / TLS"| KAFKA
+    EP2 -->|"Kafka / TLS"| KAFKA
+    READER1 --> EP1
+    LC1 --> EP1
+
+    %% Cloud internal
+    KAFKA --> PA
+    KAFKA --> PS
+    KAFKA --> FD
+    KAFKA --> AU
+    PA --> REDIS_CLOUD
+    PS --> PG_PRIMARY
+    AU --> PG_PRIMARY
+    PG_PRIMARY --> PG_REPLICA
+
+    %% Security
+    KV --> PA
+    KV --> PS
+    KV --> EP1
+    AAD --> GW
+
+    %% External
+    PA -->|"HTTPS"| NPCI
+    PS -->|"HTTPS"| NPCI
+    NHAI_SVC -->|"HTTPS batch"| NHAI_EXT
+
+    %% Observability
+    OTEL -->|"OTLP"| DYNATRACE
+    EP1 -.->|"OTLP"| OTEL
+
+    %% CI/CD
+    ADO --> ACR
+    ACR --> ARGO
+    ARGO --> AKS
+    ARGO --> EP1
+
+    %% ML
+    ML_PLATFORM --> OPS
+    ML_PLATFORM --> LM
+
+    classDef edge fill:#e8f4f8,stroke:#2980b9
+    classDef cloud fill:#eafaf1,stroke:#27ae60
+    classDef data fill:#fef9e7,stroke:#f39c12
+    classDef ext fill:#f9f9f9,stroke:#95a5a6
+    classDef sec fill:#fdecea,stroke:#e74c3c
+
+    class EP1,EP2,EPN,READER1,READER2,LC1,LC2 edge
+    class GW,PA,PS,LM,FD,AU,OPS,NHAI_SVC,OTEL cloud
+    class PG_PRIMARY,PG_REPLICA,REDIS_CLOUD,KAFKA,ACR data
+    class KV,AAD sec
+    class NPCI,NHAI_EXT ext

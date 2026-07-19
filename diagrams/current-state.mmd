@@ -1,0 +1,49 @@
+---
+title: "FASTag — Current State Flow"
+---
+sequenceDiagram
+    autonumber
+    participant V as Vehicle
+    participant R as RFID Reader<br/>(at barrier)
+    participant LC as Lane Controller
+    participant TMS as Toll Management<br/>System
+    participant PG as Payment Gateway<br/>(NPCI)
+    participant B as Issuing Bank
+    participant OP as Operator
+
+    Note over V,OP: Vehicle arrives at toll gate and stops
+
+    V->>LC: Vehicle detected (loop sensor)
+    LC->>R: Activate reader
+    R->>R: Attempt tag read (vehicle at 30–50cm)
+
+    alt Tag read success
+        R->>TMS: POST /process {tag_id} — synchronous HTTP
+        TMS->>TMS: Database lookup (tag validation)
+        TMS->>PG: POST /debit {tag_id, amount} — synchronous HTTP
+        PG->>B: Debit request
+        B-->>PG: Debit confirmation (variable latency)
+        PG-->>TMS: Payment success
+        TMS->>TMS: Write audit log — synchronous, in critical path
+        TMS-->>LC: Open barrier signal
+        LC->>V: Barrier raised
+        Note over V,LC: Total time: 30 seconds — 5 minutes
+    else Tag read failure (5–8% of transactions)
+        R->>R: Retry (3 attempts, 5 seconds each)
+        R-->>LC: Read failed
+        LC->>OP: Alert: manual intervention required
+        OP->>OP: Manually verify vehicle
+        OP->>TMS: Manual override
+        TMS->>PG: Process payment
+        PG-->>TMS: Response
+        TMS-->>LC: Open barrier
+        LC->>V: Barrier raised
+        Note over V,OP: Manual intervention: 3–8 minutes
+        Note over OP: All queued vehicles wait during this time
+    else Payment gateway timeout (3–5% of transactions)
+        PG-->>TMS: Timeout (default: 30–120s)
+        TMS-->>LC: Processing failed
+        LC->>OP: Alert: payment timeout
+        OP->>V: Direct vehicle to cash lane
+        Note over V,OP: Timeout adds 2–5 minutes per incident
+    end
