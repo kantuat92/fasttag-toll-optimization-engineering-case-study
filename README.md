@@ -1,8 +1,6 @@
 # FASTag Toll Optimization — Engineering Proposal
 
 > **Engineering Manager Submission | National Highways Authority Contract**
->
-> Prepared by a Principal Engineer with 15+ years of experience in distributed systems, platform engineering, and AI-assisted operations across FedEx, JP Morgan, and enterprise cloud programs.
 
 ---
 

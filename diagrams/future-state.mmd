@@ -1,117 +1,106 @@
 ---
-title: "FASTag — Future State Architecture Flow"
+title: "FASTag — Future State Architecture"
 ---
-flowchart TD
-    subgraph EDGE["Toll Plaza Edge"]
+flowchart LR
+
+    %% ══════════════════════════════════════════════════════
+    %%  ZONE 1 · EDGE  (Toll Plaza)
+    %% ══════════════════════════════════════════════════════
+    subgraph EDGE["  EDGE  ·  Toll Plaza  "]
         direction TB
-        RU["RFID Reader Array\n(150m upstream)"]
-        LS1["Loop Sensor\n(150m)"]
-        EP["Edge Processing Unit\n(Spring Boot)"]
-        RC["Edge Redis Cache\n(tokens + balance)"]
-        LC["Lane Controller"]
-        LS2["Loop Sensor\n(at barrier)"]
-        RG["RFID Reader\n(at barrier - fallback)"]
+        RDR["RFID Array\n◀ 150 m upstream"]
+        EPU["Edge Processor\n+ Local Redis Cache"]
+        LCT["Lane Controller\n+ Barrier"]
+        OPEN{{"✓  Barrier Opens\n    < 2s after arrival"}}
+        RDR -.->|"fallback\nreader at barrier"| LCT
     end
 
-    subgraph KAFKA["Apache Kafka — Event Bus"]
-        direction LR
-        T1["tag.read"]
-        T2["preauth.result"]
-        T3["barrier.event"]
-        T4["transaction.complete"]
-        T5["fraud.signal"]
-        T6["reader.health"]
-    end
-
-    subgraph CLOUD["Core Platform — AKS"]
+    %% ══════════════════════════════════════════════════════
+    %%  ZONE 2 · CORE PLATFORM  (AKS)
+    %% ══════════════════════════════════════════════════════
+    subgraph PLATFORM["  CORE PLATFORM  ·  Azure Kubernetes Service  "]
         direction TB
-        PA["Pre-Auth Service"]
-        PS["Payment Service"]
-        FD["Fraud Detection Service"]
-        AU["Audit Service"]
-        LM["Lane Management Service"]
-        GW["API Gateway\n(Spring Cloud Gateway)"]
-        PG[("PostgreSQL\n(HA)")]
-        RCC[("Redis Cluster\n(cloud)")]
+        KAFKA[["Apache Kafka  —  Event Bus\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\ntag.read  ·  preauth.result  ·  barrier.event\ntransaction.complete  ·  fraud.signal  ·  reader.health"]]
+        SVC["Pre-Auth  ·  Payment\nFraud Detection  ·  Audit\nLane Management"]
+        STORE[("Redis Cluster\nPostgreSQL  HA")]
+        KAFKA <-->|"consume / publish"| SVC
+        SVC <--> STORE
     end
 
-    subgraph INTEL["Intelligence Platform"]
+    %% ══════════════════════════════════════════════════════
+    %%  ZONE 3 · INTELLIGENCE  &  OPERATIONS
+    %% ══════════════════════════════════════════════════════
+    subgraph INTEL["  INTELLIGENCE  &  OPERATIONS  "]
         direction TB
-        OPS["AI Operations Assistant\n(Claude API)"]
-        ML["ML Inference\n(Azure ML)"]
-        DT["Dynatrace\n(Traces · Metrics · Logs)"]
-        DASH["Operator Dashboard"]
+        DYN["Dynatrace\nDavis AI  ·  SLOs  ·  Tracing"]
+        AIO["AI Ops Assistant\nClaude API"]
+        MLS["ML Inference\nAzure ML"]
+        ODB["Operator Dashboard"]
+        DYN --> AIO --> ODB
+        MLS --> ODB
     end
 
-    subgraph EXT["External Systems"]
-        NPCI["NPCI Payment Gateway"]
-        NHAI["NHAI Reporting"]
+    %% ══════════════════════════════════════════════════════
+    %%  EXTERNAL SYSTEMS
+    %% ══════════════════════════════════════════════════════
+    NPCI(["NPCI\nPayment Gateway"])
+    NHAI(["NHAI\nReporting"])
+
+    %% ══════════════════════════════════════════════════════
+    %%  CRITICAL PATH  ①–⑧  (solid, numbered)
+    %%  Vehicle processes in < 30 seconds end-to-end
+    %% ══════════════════════════════════════════════════════
+    RDR     -- "① Tag read"           --> EPU
+    EPU     -- "② TagRead event"      --> KAFKA
+    KAFKA   -- "③ Pre-Auth consumes"  --> SVC
+    SVC     -- "④ Pre-authorize"      --> NPCI
+    NPCI    -- "⑤ Token + hold"       --> SVC
+    SVC     -- "⑥ Token cached"       --> STORE
+    STORE  -. "⑦ Token synced\nto edge" .-> EPU
+    EPU     -- "⑧ Token lookup"       --> LCT
+    LCT     -- "Barrier opens"        --> OPEN
+
+    %% ══════════════════════════════════════════════════════
+    %%  ASYNC FLOWS  (dashed — not in gate critical path)
+    %% ══════════════════════════════════════════════════════
+    LCT  -.->|"BarrierOpened"| KAFKA
+    SVC  -.->|"settlement capture"| NPCI
+    KAFKA-.->|"txn.complete"| NHAI
+    KAFKA-.->|"fraud.signal → alert"| ODB
+
+    %% ══════════════════════════════════════════════════════
+    %%  OBSERVABILITY  (dotted)
+    %% ══════════════════════════════════════════════════════
+    EPU  -. "OTLP" .-> DYN
+    SVC  -. "OTLP" .-> DYN
+    LCT  -. "OTLP" .-> DYN
+    KAFKA-.->|"reader.health"| MLS
+
+    %% ══════════════════════════════════════════════════════
+    %%  LEGEND
+    %% ══════════════════════════════════════════════════════
+    subgraph LEGEND["  Legend  "]
+        direction TB
+        LA["━━━▶  Critical path  (gate decision)"]
+        LB["╌╌╌▶  Async flow  (post-passage)"]
+        LC2["┄┄┄▶  Observability  (OTLP / telemetry)"]
     end
 
-    %% Edge flow
-    RU -->|"Tag read signal"| EP
-    LS1 -->|"Vehicle presence"| EP
-    EP -->|"Check / store token"| RC
-    EP -->|"TagRead event"| T1
+    %% ══════════════════════════════════════════════════════
+    %%  STYLES
+    %% ══════════════════════════════════════════════════════
+    classDef edge    fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,font-weight:bold
+    classDef kafka   fill:#ede9fe,stroke:#7c3aed,color:#4c1d95,font-weight:bold
+    classDef service fill:#dcfce7,stroke:#15803d,color:#14532d
+    classDef store   fill:#fef9c3,stroke:#b45309,color:#78350f
+    classDef intel   fill:#fff7ed,stroke:#c2410c,color:#7c2d12
+    classDef ext     fill:#f1f5f9,stroke:#64748b,color:#334155
+    classDef legend  fill:#f8fafc,stroke:#cbd5e1,color:#64748b,font-size:12px
 
-    %% Pre-auth flow
-    T1 -->|"Consume"| PA
-    PA -->|"Pre-authorize"| NPCI
-    NPCI -->|"Token + hold"| PA
-    PA -->|"Store token"| RCC
-    PA -->|"PreAuthApproved event"| T2
-
-    %% Gate decision (< 2s after vehicle arrives)
-    LS2 -->|"Vehicle at barrier"| LC
-    LC -->|"Token lookup"| RC
-    RC -->|"Token found ✓"| LC
-    LC -->|"Barrier open signal"| LC
-    LC -->|"BarrierOpened event"| T3
-
-    %% Async settlement (not in critical path)
-    T3 -->|"Consume"| PS
-    PS -->|"Settlement capture"| NPCI
-    PS -->|"Write record"| PG
-    PS -->|"TransactionComplete event"| T4
-
-    %% Fraud and Audit (async)
-    T1 -->|"Consume"| FD
-    T4 -->|"Consume"| FD
-    FD -->|"FraudSignal event"| T5
-    T5 -->|"Fraud alert"| DASH
-    T5 -->|"Flag for review"| LM
-    T3 -->|"Consume"| AU
-    T4 -->|"Consume"| AU
-    AU -->|"Append audit record"| PG
-
-    %% Operator
-    DASH -->|"API"| GW
-    GW -->|"Route"| LM
-    GW -->|"Route"| PA
-
-    %% Intelligence
-    DT -->|"Incident telemetry"| OPS
-    T6 -->|"Consume"| ML
-    ML -->|"Failure prediction"| DASH
-    OPS -->|"RCA advisory"| DASH
-
-    %% Reporting
-    T4 -->|"Consume"| NHAI
-
-    %% Observability
-    EP -.->|"OTLP traces"| DT
-    PA -.->|"OTLP traces"| DT
-    PS -.->|"OTLP traces"| DT
-    LC -.->|"OTLP traces"| DT
-
-    classDef edge fill:#e8f4f8,stroke:#2980b9
-    classDef cloud fill:#eafaf1,stroke:#27ae60
-    classDef intel fill:#fef9e7,stroke:#f39c12
-    classDef ext fill:#f9f9f9,stroke:#95a5a6
-    classDef kafka fill:#fdf2f8,stroke:#8e44ad
-
-    class RU,LS1,EP,RC,LC,LS2,RG edge
-    class PA,PS,FD,AU,LM,GW,PG,RCC cloud
-    class OPS,ML,DT,DASH intel
+    class RDR,EPU,LCT,OPEN edge
+    class KAFKA kafka
+    class SVC service
+    class STORE store
+    class DYN,AIO,MLS,ODB intel
     class NPCI,NHAI ext
-    class T1,T2,T3,T4,T5,T6 kafka
+    class LA,LB,LC2 legend
